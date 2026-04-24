@@ -18,6 +18,9 @@ These components (MCTS supervision, router training scripts, and lm-eval integra
 
 
 ## 🆕 Latest Updates
+- 🚀 **24 April 2026**: Data generation code released!
+- 🏆 **3 February 2026**: Paper accepted at [TTT @ ICLR 2026](https://iclr.cc/virtual/2026/workshop/10000776)!
+- 🎉 **25 January 2026**: Paper accepted at [ICLR 2026](https://iclr.cc/virtual/2026/poster/10011611)!
 - 📢 **15 October 2025**: Paper ArXived!
 
 ## 📘 Table of Contents
@@ -28,6 +31,7 @@ These components (MCTS supervision, router training scripts, and lm-eval integra
 - [📊 Results Summary](#-results-summary)
 - [⚙️ Usage](#️-usage)
   - [Installation](#1️⃣-installation)
+  - [Data Generation with MCTS](#2️⃣-data-generation-with-mcts)
   - [Training the Routers](#2️⃣-training-the-routers)
   - [Evaluation with lm-eval-harness](#3️⃣-evaluation-with-lm-eval-harness)
 - [🧭 Citation](#-citation)
@@ -100,6 +104,50 @@ git clone https://github.com/parameterlab/dr-llm
 cd dr-llm
 pip install -r requirements.txt
 ```
+
+### 2️⃣ Data Generation with MCTS
+
+The data generation pipeline uses **length-aware MCTS** to discover optimal per-layer routing configurations (skip/execute/repeat) for each training example.
+
+#### Supported Models
+
+Modified model files compatible with the data generation pipeline are provided in `data_models/`:
+
+```
+data_models/
+├── modeling_llama.py
+├── modeling_qwen2.py
+├── modeling_qwen3.py
+└── ...
+```
+
+These files expose a `layer_indices` attribute on the base model class, which the MCTS search manipulates at runtime to explore different execution paths — no weight modification required. See `data_models/README.md` for instructions on adapting a new model architecture.
+
+#### Running Data Generation
+
+```bash
+python data_generation.py \
+  --model meta-llama/Llama-3.2-3B-Instruct \
+  --dataset arc,dart \
+  --output_dir data/mcts_paths \
+  --num_simulations 50 \
+  --budget 2
+```
+
+#### Key Arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `--model` | — | HuggingFace model path or ID |
+| `--dataset` | `arc,dart` | Comma-separated list of datasets |
+| `--num_simulations` | `50` | MCTS simulations per example |
+| `--budget` | `2` | Max path length factor (cap at `2L`) |
+| `--output_dir` | `data/` | Where to save routing configurations |
+
+#### Output Format
+
+Each output file contains MCTS-derived tuples `(question, optimal_layer_config, answer)` where `optimal_layer_config` is a vector of `{0=skip, 1=execute, 2=repeat}` labels of length `L` (number of layers). These are used directly as supervision targets for router training.
+
 
 <details>
 <summary><b>2️⃣ Training the Routers </b></summary>
