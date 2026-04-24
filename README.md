@@ -6,14 +6,6 @@
 <a href="https://www.linkedin.com/in/ahmed-heakl/"><b>Ahmed Heakl</b></a>, <a href="https://scholar.google.com/citations?user=Jt4OYwMAAAAJ&hl=fr"><b>Martin Gubri</b></a>, <a href="https://scholar.google.com/citations?user=M59O9lkAAAAJ&hl=en"><b>Salman Khan</b></a>, <a href="https://scholar.google.com/citations?user=o0qtjzYAAAAJ&hl=en"><b>Sangdoo Yun</b></a>, <a href="https://seongjoonoh.com/"><b>Seong Joon Oh</b></a></br>
 Parameter Lab · MBZUAI · NAVER AI Lab · University of Tübingen · Tübingen AI Center
 
-
----
-
-### 🚨 Code Release Status
-🧩 The **training**, **data generation**, and **in-domain evaluation** code for **Dr.LLM** are **not yet released**.  
-These components (MCTS supervision, router training scripts, and lm-eval integration) will be made public in an upcoming update.  
-**Stay tuned for the full release!**
-
 </div>
 
 
@@ -149,39 +141,137 @@ python data_generation.py \
 Each output file contains MCTS-derived tuples `(question, optimal_layer_config, answer)` where `optimal_layer_config` is a vector of `{0=skip, 1=execute, 2=repeat}` labels of length `L` (number of layers). These are used directly as supervision targets for router training.
 
 
-<details>
-<summary><b>2️⃣ Training the Routers </b></summary>
+### 3️⃣ Training the Routers
 
-> ⚠️ Note: Full code release is pending ⚠️
+Training uses **AdamW**, 25 epochs, **1×10⁻³ LR**, **bf16 precision**, and a **single A100 GPU (40GB)** — taking under 4 hours with only 4K MCTS-derived examples.
 
-Training uses **AdamW**, 25 epochs, **1×10⁻³ LR**, **bf16 precision**, and a **single A100 GPU (40GB)** — taking under 4 hours.
+#### Supported Models
 
+Modified model files compatible with router training are provided in `train_models/`:
 
-Models source code must be manipulated to insert routers after each transformer block. 
+```
+train_models/
+├── modeling_llama.py
+├── modeling_qwen2.py
+├── modeling_qwen3.py
+└── ...
+```
 
-Routers are trained separately using MCTS-generated supervision:
+These files insert a `RouterBlock` (Linear-GELU-Linear, hidden dim 128) after each transformer block and expose `init_routers()`, `num_windows`, and `is_static_routing` on the base model class. See `train_models/README.md` for instructions on adapting a new model architecture.
+
+#### Running Router Training
 
 ```bash
 python train.py \
-  --model llama-3-8b-instruct \
-  --data_dir data/arc_dart \
-  --save_dir checkpoints/drllm_router
+  --model_id meta-llama/Llama-3.2-3B-Instruct \
+  --run_name drllm-llama-3b \
+  --num_epochs 25 \
+  --learning_rate 1e-3 \
+  --weight_decay 0.01 \
+  --warmup_steps 500 \
+  --gradient_accumulation 16
 ```
-</details>
 
-<details>
-<summary><b>3️⃣ Evaluation with lm-eval-harness</b></summary>
+#### Key Arguments
 
-> 🚨 Note: Full code release is pending 🚨
+| Argument | Default | Description |
+|---|---|---|
+| `--model_id` | — | HuggingFace model path or ID |
+| `--run_name` | — | Run name for checkpoints and W&B logging |
+| `--num_epochs` | `15` | Number of training epochs |
+| `--learning_rate` | `1e-3` | Learning rate |
+| `--weight_decay` | `0.01` | AdamW weight decay |
+| `--warmup_steps` | `500` | LR warmup steps |
+| `--gradient_accumulation` | `16` | Gradient accumulation steps |
+| `--num_windows` | `8` | Number of pooling windows for router input |
+| `--with_squad` | `False` | Include SQuADv2 data in training |
+| `--with_commonsense` | `False` | Include commonsense data in training |
+
+#### Training Details
+
+- **Frozen base**: all base model parameters are frozen; only `model.model.routers` is trained (11M params for 3B models, 0.14% of total weights)
+- **Loss**: focal loss with effective-number class rebalancing (`β=0.999`, `γ=2`) to handle the heavy skip/execute/repeat class imbalance
+- **Router input**: windowed mean-pooled hidden states from the previous layer (default 8 windows)
+- **Teacher forcing**: ground-truth routing labels are used during training to avoid inter-router dependency
+- **Optimizer**: AdamW with cosine LR schedule
+- **Precision**: bf16
+- **Logging**: Weights & Biases (`--report_to wandb`)
+- **Checkpoints**: saved to `checkpoints/{run_name}/`
+
+#### Monitored Metrics
+
+During training, the following metrics are logged per step:
+
+| Metric | Description |
+|---|---|
+| `macro_f1` | Macro F1 across skip/execute/repeat |
+| `f1_skip` / `f1_execute` / `f1_repeat` | Per-class F1 scores |
+| `acc_skip` / `acc_repeat` | Per-class accuracy for minority classes |
+| `avg_layers` | Average number of layers executed per example |
+| `routers_loss` | Focal loss on routing decisions |
+
+### 4️⃣ Evaluation with lm-eval-harness
+
+We evaluate Dr.LLM using [`lm-evaluation-harness`](https://github.com/EleutherAI/lm-evaluation-harness). The same modified model files from `train_models/` are used for evaluation — no additional changes needed.
+
+#### Baseline Evaluation (No Routing)
+
+To evaluate the vanilla model without routing:
 
 ```bash
-lm_eval \
-  --model openai/llama-3-8b-instruct \
-  --tasks arc_challenge,dart,gsm8k,mmlu \
-  --device cuda
+accelerate launch --multi_gpu --num_processes 4 lm_eval \
+    --model hf \
+    --model_args pretrained="meta-llama/Llama-3.2-3B-Instruct" \
+    --tasks arc_challenge,arc_easy,mmlu,aime24,truthfulqa,gsm8k,piqa \
+    --batch_size 1
 ```
-</details>
 
+#### Dr.LLM Evaluation (With Routing)
+
+To evaluate a trained Dr.LLM checkpoint:
+
+```bash
+accelerate launch --num_processes 2 lm_eval \
+    --model hf \
+    --model_args pretrained=checkpoints/drllm-llama-3b-instruct,dtype=bfloat16,num_windows=8 \
+    --tasks arc_challenge,arc_easy,mmlu,aime24,truthfulqa,gsm8k,piqa \
+    --batch_size 1 \
+    --gen_kwargs max_new_tokens=256 \
+    --cache_requests true
+```
+
+#### Key Arguments
+
+| Argument | Description |
+|---|---|
+| `pretrained` | Path to HuggingFace model ID or local Dr.LLM checkpoint |
+| `dtype` | Model precision, use `bfloat16` |
+| `num_windows` | Number of pooling windows — must match the value used during training |
+| `--tasks` | Comma-separated list of benchmarks |
+| `--batch_size` | Batch size per device, use `1` for stability |
+| `--gen_kwargs` | Generation kwargs, e.g. `max_new_tokens=256` |
+| `--cache_requests` | Cache tokenized requests to speed up repeated runs |
+
+#### Supported Benchmarks
+
+| Benchmark | Domain | Split |
+|---|---|---|
+| `arc_easy` / `arc_challenge` | Logic Reasoning | In-domain |
+| `dart` (levels 1–5) | Math Reasoning | In-domain |
+| `mmlu` | Factual Knowledge | Out-of-domain |
+| `gsm8k` | Grade-school Math | Out-of-domain |
+| `aime24` | Competition Math | Out-of-domain |
+| `truthfulqa` | Adversarial Factuality | Out-of-domain |
+| `gpqa_diamond` | Graduate Reasoning | Out-of-domain |
+| `agieval` | Exam Reasoning | Out-of-domain |
+| `squadv2` | Reading Comprehension | Out-of-domain |
+| `piqa` | Commonsense Reasoning | Out-of-domain |
+
+#### Notes
+
+- All results in the paper use **greedy decoding**, 2048 max tokens, and default `lm-eval-harness` settings.
+- `num_windows` must match the value used during training (default: `8`). Mismatches will silently produce incorrect routing decisions.
+- Set `is_static_routing=True` in the model to force all decisions to `execute` — useful for sanity-checking that the base model is loaded correctly before evaluating routing.
 
 ---
 
