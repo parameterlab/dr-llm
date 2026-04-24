@@ -10,7 +10,7 @@ Parameter Lab · MBZUAI · NAVER AI Lab · University of Tübingen · Tübingen 
 
 
 ## 🆕 Latest Updates
-- 🚀 **24 April 2026**: Data generation code released!
+- 🚀 **24 April 2026**: Full code released!
 - 🏆 **3 February 2026**: Paper accepted at [TTT @ ICLR 2026](https://iclr.cc/virtual/2026/workshop/10000776)!
 - 🎉 **25 January 2026**: Paper accepted at [ICLR 2026](https://iclr.cc/virtual/2026/poster/10011611)!
 - 📢 **15 October 2025**: Paper ArXived!
